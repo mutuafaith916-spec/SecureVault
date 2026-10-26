@@ -1,0 +1,14 @@
+{
+  "name": "securevault",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix backend run build",
+    "test": "npm --prefix backend test",
+    "migration:run": "npm --prefix backend run migration:run",
+    "migration:show": "npm --prefix backend run migration:show",
+    "migration:revert": "npm --prefix backend run migration:revert"
+  }
+}
