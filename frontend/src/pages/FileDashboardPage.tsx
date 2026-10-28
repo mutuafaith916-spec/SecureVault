@@ -42,6 +42,21 @@ interface AuditEvent {
   file: { id: string; originalName: string } | null
 }
 
+interface FileOverview {
+  filesOwned: number
+  storageUsedBytes: string
+  sharesGiven: number
+  sharesReceived: number
+  backups: { completed: number; pending: number; failed: number }
+  account: {
+    fullName: string
+    email: string
+    role: 'USER' | 'ADMIN'
+    mfaEnabled: boolean
+  }
+  recentActivity: AuditEvent[]
+}
+
 interface ApiResult {
   success: boolean
   message?: string
@@ -50,6 +65,7 @@ interface ApiResult {
   deletedFiles?: DeletedFile[]
   shares?: FileShareGrant[]
   auditLogs?: AuditEvent[]
+  overview?: FileOverview
   share?: FileShareGrant
 }
 
@@ -115,11 +131,11 @@ function FileDashboardPage() {
   const [isSavingShare, setIsSavingShare] = useState(false)
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
   const [deletedFiles, setDeletedFiles] = useState<DeletedFile[]>([])
-  const ownedFileCount = files.filter((file) => file.access === 'OWNER').length
-  const sharedWithMeCount = files.filter((file) => file.access === 'SHARED').length
-  const storageUsed = files
-    .filter((file) => file.access === 'OWNER')
-    .reduce((total, file) => total + (Number(file.fileSize) || 0), 0)
+  const [overview, setOverview] = useState<FileOverview | null>(null)
+  const [isRequestingPasswordReset, setIsRequestingPasswordReset] = useState(false)
+  const ownedFileCount = overview?.filesOwned
+  const sharedWithMeCount = overview?.sharesReceived
+  const storageUsed = overview?.storageUsedBytes
   const filteredFiles = files.filter((file) => {
     const matchesSearch = file.originalName
       .toLowerCase()
@@ -178,6 +194,24 @@ function FileDashboardPage() {
     }
   }, [navigate])
 
+  const loadOverview = useCallback(async (): Promise<void> => {
+    try {
+      const response = await fetchWithSession('/api/v1/files/overview')
+      if (response.status === 401) {
+        navigate('/login', { replace: true })
+        return
+      }
+      const result = await response.json() as ApiResult
+      if (!response.ok || !result.success || !result.overview) {
+        setNotice({ type: 'error', message: result.message || 'Account overview could not be loaded.' })
+        return
+      }
+      setOverview(result.overview)
+    } catch {
+      setNotice({ type: 'error', message: 'Account overview could not be loaded. Check your connection.' })
+    }
+  }, [navigate])
+
   useEffect(() => {
     let isMounted = true
     async function loadInitialFiles() {
@@ -199,6 +233,7 @@ function FileDashboardPage() {
           return
         }
         setFiles(result.files)
+        await loadOverview()
         await loadDeletedFiles()
         if (!isMounted) {
           return
@@ -237,7 +272,7 @@ function FileDashboardPage() {
     return () => {
       isMounted = false
     }
-  }, [loadDeletedFiles, navigate])
+  }, [loadDeletedFiles, loadOverview, navigate])
 
   const loadFiles = useCallback(async (): Promise<boolean> => {
     try {
@@ -255,6 +290,7 @@ function FileDashboardPage() {
         return false
       }
       setFiles(result.files)
+      await loadOverview()
       return true
     } catch {
       setNotice({
@@ -265,7 +301,7 @@ function FileDashboardPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [navigate])
+  }, [loadOverview, navigate])
 
   const loadAuditEvents = useCallback(async (): Promise<void> => {
     try {
@@ -694,6 +730,32 @@ function FileDashboardPage() {
     }
   }
 
+  async function handlePasswordResetRequest() {
+    if (!overview?.account.email) {
+      setNotice({ type: 'error', message: 'Your account email is unavailable. Sign out and sign in again.' })
+      return
+    }
+    setIsRequestingPasswordReset(true)
+    setNotice(null)
+    try {
+      const response = await fetchWithSession('/api/v1/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: overview.account.email }),
+      })
+      const result = await response.json() as ApiResult
+      if (!response.ok || !result.success) {
+        setNotice({ type: 'error', message: result.message || 'Password reset email could not be requested.' })
+        return
+      }
+      setNotice({ type: 'success', message: 'If password recovery is configured, a reset link will be sent to your account email.' })
+    } catch {
+      setNotice({ type: 'error', message: 'Password reset could not be requested. Check your connection.' })
+    } finally {
+      setIsRequestingPasswordReset(false)
+    }
+  }
+
   return (
     <main className="vault-page">
       <header className="vault-header">
@@ -708,6 +770,7 @@ function FileDashboardPage() {
         </Link>
         <div className="vault-header-actions">
           <span className="vault-session-indicator"><span /> PRIVATE SESSION</span>
+          {overview?.account.role === 'ADMIN' && <Link className="vault-refresh" to="/admin">Admin console</Link>}
           <button className="vault-logout" type="button" onClick={handleLogout}>Sign out</button>
         </div>
       </header>
@@ -759,18 +822,28 @@ function FileDashboardPage() {
         <section className="vault-overview" aria-label="Vault overview">
           <article className="vault-overview-card">
             <span>Files you own</span>
-            <strong>{ownedFileCount}</strong>
+            <strong>{ownedFileCount ?? 'Unavailable'}</strong>
             <small>Active files in your vault</small>
           </article>
           <article className="vault-overview-card">
             <span>Shared with you</span>
-            <strong>{sharedWithMeCount}</strong>
-            <small>Active shares available to your account</small>
+            <strong>{sharedWithMeCount ?? 'Unavailable'}</strong>
+            <small>Active grants on files owned by others</small>
+          </article>
+          <article className="vault-overview-card">
+            <span>Shared by you</span>
+            <strong>{overview?.sharesGiven ?? 'Unavailable'}</strong>
+            <small>Active grants from files you own</small>
           </article>
           <article className="vault-overview-card">
             <span>Storage used</span>
-            <strong>{formatFileSize(String(storageUsed))}</strong>
+            <strong>{storageUsed === undefined ? 'Unavailable' : formatFileSize(storageUsed)}</strong>
             <small>Owned file sizes only</small>
+          </article>
+          <article className="vault-overview-card">
+            <span>File backups</span>
+            <strong>{overview ? `${overview.backups.completed} complete` : 'Unavailable'}</strong>
+            <small>{overview ? `${overview.backups.pending} pending · ${overview.backups.failed} failed` : 'Backup status unavailable'}</small>
           </article>
           <article className="vault-overview-card">
             <span>Storage quota</span>
@@ -855,6 +928,7 @@ function FileDashboardPage() {
                 onClick={() => {
                   setFileSearch('')
                   setFileTypeFilter('all')
+                  setFileSort('newest')
                 }}
               >
                 Clear filters
@@ -961,6 +1035,23 @@ function FileDashboardPage() {
             <div><dt>Architecture</dt><dd>Not end-to-end encrypted; the server can decrypt authorized files</dd></div>
             <div><dt>Upload limit</dt><dd>700 KB per file</dd></div>
           </dl>
+        </section>
+
+        <section className="vault-encryption-details" aria-labelledby="vault-account-security-heading">
+          <div>
+            <div className="section-kicker">ACCOUNT SECURITY</div>
+            <h2 id="vault-account-security-heading">Security settings</h2>
+          </div>
+          <dl>
+            <div><dt>Account</dt><dd>{overview?.account.fullName || 'Unavailable'} · {overview?.account.email || 'Unavailable'}</dd></div>
+            <div><dt>Multi-factor authentication</dt><dd>Email verification code required after password</dd></div>
+            <div><dt>Sign-in protection</dt><dd>A one-time code is emailed at each sign-in</dd></div>
+            <div><dt>Active session management</dt><dd>Separate session listing/revocation is not available</dd></div>
+          </dl>
+          <button type="button" className="vault-refresh" onClick={() => void handlePasswordResetRequest()} disabled={isRequestingPasswordReset}>
+            {isRequestingPasswordReset ? 'Requesting reset…' : 'Email me a password reset link'}
+          </button>
+          <p className="admin-note">Password changes use the existing email-verified recovery flow. Email sign-in codes depend on access to your mailbox and the configured mail service.</p>
         </section>
 
         <section className="vault-activity" aria-labelledby="vault-activity-heading">

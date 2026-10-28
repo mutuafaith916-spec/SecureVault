@@ -6,6 +6,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  type Relation,
 } from 'typeorm'
 import { FileEntity } from './File.js'
 
@@ -44,5 +45,5 @@ export class Backup {
 
   @ManyToOne(() => FileEntity, (file) => file.backups, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'file_id', foreignKeyConstraintName: 'FK_backups_file' })
-  file!: FileEntity
+  file!: Relation<FileEntity>
 }

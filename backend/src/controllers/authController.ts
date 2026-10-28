@@ -7,7 +7,8 @@ import { User } from '../entities/User.js'
 import {
   hashUserPassword,
   loginUser,
-  completeMfaLogin,
+  completeEmailMfaLogin,
+  requestEmailMfaCode,
   refreshUserSession,
   revokeRefreshToken,
 } from '../services/auth.service.js'
@@ -110,7 +111,7 @@ export function createLoginController(
       throw new HttpError(400, 'Please provide your email address and password.')
     }
 
-    const { email, password, rememberMe, restartMfaSetup } = request.body as Record<string, unknown>
+    const { email, password, rememberMe } = request.body as Record<string, unknown>
     if (
       typeof email !== 'string' ||
       email.length > 320 ||
@@ -118,8 +119,7 @@ export function createLoginController(
       password.length > 128 ||
       !email.trim() ||
       !password ||
-      (rememberMe !== undefined && typeof rememberMe !== 'boolean') ||
-      (restartMfaSetup !== undefined && typeof restartMfaSetup !== 'boolean')
+      (rememberMe !== undefined && typeof rememberMe !== 'boolean')
     ) {
       throw new HttpError(400, 'Please provide your email address and password.')
     }
@@ -132,35 +132,86 @@ export function createLoginController(
         email,
         password,
         rememberMe === true,
-        restartMfaSetup === true,
       )
     } catch (error) {
       if (error instanceof HttpError && error.statusCode === 401) {
         await dataSource.transaction((manager) =>
-          writeAuditLog(manager, request, AuditAction.LOGIN_FAILED, null, null, environment),
+          writeAuditLog(
+            manager,
+            request,
+            AuditAction.LOGIN_FAILED,
+            null,
+            null,
+            environment,
+            { authenticationFactor: 'PASSWORD' },
+          ),
+        )
+      }
+      throw error
+    }
+    try {
+      await requestEmailMfaCode(dataSource, environment, result.challengeToken)
+    } catch (error) {
+      if (error instanceof HttpError && error.statusCode === 401) {
+        await dataSource.transaction((manager) =>
+          writeAuditLog(
+            manager,
+            request,
+            AuditAction.LOGIN_FAILED,
+            null,
+            null,
+            environment,
+            { authenticationFactor: 'MFA_EMAIL' },
+          ),
         )
       }
       throw error
     }
     response.status(200).json({
       success: true,
-      message: result.mfaSetupRequired
-        ? 'Set up an authenticator app to finish signing in.'
-        : 'Enter your authenticator code to finish signing in.',
+      message: 'A verification code has been sent to the email address on your account.',
       mfaRequired: true,
-      mfaSetupRequired: result.mfaSetupRequired,
       challengeToken: result.challengeToken,
-      ...(result.provisioningUri
-        ? {
-            provisioningUri: result.provisioningUri,
-            manualSecret: result.manualSecret,
-          }
-        : {}),
     })
   }
 }
 
-export function createMfaVerifyController(
+export function createEmailMfaRequestController(
+  dataSource: DataSource,
+  environment: EnvironmentConfig,
+): RequestHandler {
+  return async (request, response) => {
+    const body = request.body as Record<string, unknown> | null
+    if (!body || typeof body.challengeToken !== 'string' || body.challengeToken.length > 4096) {
+      throw new HttpError(400, 'Your sign-in challenge is invalid. Please sign in again.')
+    }
+
+    try {
+      await requestEmailMfaCode(dataSource, environment, body.challengeToken)
+    } catch (error) {
+      if (error instanceof HttpError && error.statusCode === 401) {
+        await dataSource.transaction((manager) =>
+          writeAuditLog(
+            manager,
+            request,
+            AuditAction.LOGIN_FAILED,
+            null,
+            null,
+            environment,
+            { authenticationFactor: 'MFA_EMAIL' },
+          ),
+        )
+      }
+      throw error
+    }
+    response.status(200).json({
+      success: true,
+      message: 'A verification code has been sent to the email address on your account.',
+    })
+  }
+}
+
+export function createEmailMfaVerifyController(
   dataSource: DataSource,
   environment: EnvironmentConfig,
 ): RequestHandler {
@@ -173,16 +224,24 @@ export function createMfaVerifyController(
       typeof body.code !== 'string' ||
       !/^\d{6}$/.test(body.code)
     ) {
-      throw new HttpError(400, 'Enter the six-digit code from your authenticator app.')
+      throw new HttpError(400, 'Enter the six-digit code sent to your email address.')
     }
 
-    let result: Awaited<ReturnType<typeof completeMfaLogin>>
+    let result: Awaited<ReturnType<typeof completeEmailMfaLogin>>
     try {
-      result = await completeMfaLogin(dataSource, environment, body.challengeToken, body.code)
+      result = await completeEmailMfaLogin(dataSource, environment, body.challengeToken, body.code)
     } catch (error) {
       if (error instanceof HttpError && error.statusCode === 401) {
         await dataSource.transaction((manager) =>
-          writeAuditLog(manager, request, AuditAction.LOGIN_FAILED, null, null, environment),
+          writeAuditLog(
+            manager,
+            request,
+            AuditAction.LOGIN_FAILED,
+            null,
+            null,
+            environment,
+            { authenticationFactor: 'MFA_EMAIL' },
+          ),
         )
       }
       throw error

@@ -6,6 +6,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  type Relation,
 } from 'typeorm'
 import { User } from './User.js'
 
@@ -37,5 +38,5 @@ export class RefreshToken {
 
   @ManyToOne(() => User, (user) => user.refreshTokens, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'user_id', foreignKeyConstraintName: 'FK_refresh_tokens_user' })
-  user!: User
+  user!: Relation<User>
 }

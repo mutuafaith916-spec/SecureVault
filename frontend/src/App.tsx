@@ -4,6 +4,7 @@ import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import FileDashboardPage from './pages/FileDashboardPage'
+import AdminDashboardPage from './pages/AdminDashboardPage'
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
         <Route path="/register" element={<RegisterPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/files" element={<FileDashboardPage />} />
+        <Route path="/admin" element={<AdminDashboardPage />} />
       </Routes>
     </BrowserRouter>
   )

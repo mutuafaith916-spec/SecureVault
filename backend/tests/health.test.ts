@@ -13,6 +13,7 @@ const environment: EnvironmentConfig = {
   port: 0,
   corsOrigin: 'http://localhost:5173',
   databaseUrl: configuredDatabaseUrl ?? '',
+  jwtAccessSecret: 'securevault-route-test-access-secret',
   securityAlertEmails: [],
 }
 const dataSource = configuredDatabaseUrl
@@ -132,5 +133,25 @@ test('password reset reports missing SMTP setup without querying account data', 
   assert.deepEqual(await response.json(), {
     success: false,
     message: 'Password reset email is not configured. Please contact support.',
+  })
+})
+
+test('admin overview and user listing reject requests without an authenticated session', async () => {
+  for (const path of ['/api/v1/admin/overview', '/api/v1/admin/users']) {
+    const response = await fetch(`${baseUrl}${path}`)
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), {
+      success: false,
+      message: 'Your session is invalid or expired. Please log in again.',
+    })
+  }
+})
+
+test('personal file overview rejects requests without an authenticated session', async () => {
+  const response = await fetch(`${baseUrl}/api/v1/files/overview`)
+  assert.equal(response.status, 401)
+  assert.deepEqual(await response.json(), {
+    success: false,
+    message: 'Your session is invalid or expired. Please log in again.',
   })
 })

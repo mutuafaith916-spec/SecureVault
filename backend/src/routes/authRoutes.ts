@@ -8,7 +8,8 @@ import {
   createForgotPasswordController,
   createLogoutController,
   createLoginController,
-  createMfaVerifyController,
+  createEmailMfaRequestController,
+  createEmailMfaVerifyController,
   createRefreshSessionController,
   createRegisterController,
   createResetPasswordController,
@@ -36,6 +37,17 @@ const mfaRateLimit = rateLimit({
   },
 })
 
+const mfaEmailRequestRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 6,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many email-code requests. Please sign in again later.',
+  },
+})
+
 const loginRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
@@ -55,7 +67,8 @@ export function createAuthRoutes(
 
   router.post('/register', createRegisterController(dataSource))
   router.post('/login', loginRateLimit, createLoginController(dataSource, environment))
-  router.post('/mfa/verify', mfaRateLimit, createMfaVerifyController(dataSource, environment))
+  router.post('/mfa/email/request', mfaEmailRequestRateLimit, createEmailMfaRequestController(dataSource, environment))
+  router.post('/mfa/email/verify', mfaRateLimit, createEmailMfaVerifyController(dataSource, environment))
   router.post('/refresh', createRefreshSessionController(dataSource, environment))
   router.post('/logout', createLogoutController(dataSource, environment))
   router.get(

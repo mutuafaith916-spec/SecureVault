@@ -19,6 +19,7 @@ import {
 } from '../controllers/fileController.js'
 import { createAuthMiddleware } from '../middleware/authMiddleware.js'
 import { createDataExportController } from '../controllers/dataExportController.js'
+import { createFileOverviewController } from '../controllers/fileOverviewController.js'
 
 const uploadRateLimiter = rateLimit({
   windowMs: fileUploadRateLimit.windowMs,
@@ -40,6 +41,11 @@ export function createFileRoutes(
     '/export',
     createAuthMiddleware(environment, dataSource),
     createDataExportController(dataSource, environment),
+  )
+  router.get(
+    '/overview',
+    createAuthMiddleware(environment, dataSource),
+    createFileOverviewController(dataSource),
   )
   router.get(
     '/',

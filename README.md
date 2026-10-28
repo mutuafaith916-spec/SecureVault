@@ -7,12 +7,13 @@ SecureVault is a privacy-focused file storage demo. The browser sends file bytes
 Requirements: Node.js and PostgreSQL. Local development can use the encrypted local-disk adapter. Production requires Cloudflare R2 (or another S3-compatible service) and two separate buckets.
 
 1. Copy `backend/.env.example` to `backend/.env`.
-2. Set `DATABASE_URL` to the PostgreSQL connection string, configure independent random `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` values of at least 32 characters, and set `ENCRYPTION_MASTER_KEY` to a base64-encoded 32-byte key. In production, retrieve secrets from a managed secret store or KMS-backed deployment secret integration; do not commit them or put them in the file backup bucket. Losing the encryption key makes encrypted files and stored MFA secrets unrecoverable. See [Key backup and recovery](#key-backup-and-recovery).
+2. Set `DATABASE_URL` to the PostgreSQL connection string, configure independent random `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` values of at least 32 characters, and set `ENCRYPTION_MASTER_KEY` to a base64-encoded 32-byte key. In production, retrieve secrets from a managed secret store or KMS-backed deployment secret integration; do not commit them or put them in the file backup bucket. Losing the encryption key makes encrypted files and any legacy stored authenticator secrets unrecoverable. See [Key backup and recovery](#key-backup-and-recovery).
 3. For Cloudflare R2, create a primary bucket and a different backup bucket. Set `STORAGE_PROVIDER=s3`, `CLOUD_STORAGE_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`, `CLOUD_STORAGE_REGION=auto`, `CLOUD_STORAGE_BUCKET`, and `CLOUD_BACKUP_BUCKET`. Create an R2 API token with object read/write/delete access to both buckets and set its S3 access key and secret in `CLOUD_STORAGE_ACCESS_KEY_ID` and `CLOUD_STORAGE_SECRET_ACCESS_KEY`. The application sends only AES-256-GCM ciphertext to both buckets.
 4. Local development defaults to `STORAGE_PROVIDER=local`, storing encrypted files and backups under `backend/storage`. Production refuses local storage. S3-compatible storage requires both buckets to exist before the application starts uploading.
-5. To enable password reset and security alerts, set all of `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`. Reset links are disabled until SMTP is configured.
+5. To enable sign-in codes, password reset, and security alerts, configure all of `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM`. Sign-in always requires a password followed by a one-time email code. Codes are HMAC-hashed at rest, expire after five minutes, are single-use, and have bounded resend and verification attempts.
 6. Configure `SECURITY_ALERT_EMAILS` as a comma-separated list of administrator/security contacts. SMTP and at least one recipient are required in production for security notifications.
-7. Run the schema migrations:
+   Rule-based persisted alerts are generated from audit activity for repeated password/MFA failures, repeated or varied unauthorized file access, download bursts, sharing changes, and privilege changes. Optional `SECURITY_*_THRESHOLD` variables in `backend/.env.example` configure event counts; `SECURITY_DETECTION_COOLDOWN_MINUTES` controls alert deduplication. Administrators can review and resolve alerts in `/admin`. These rules are limited heuristics: they do not cover every attack, automatically block activity, or guarantee detection. Alert persistence requires applying the registered `AddSecurityAlerts1792443000000` migration before deploying this version.
+7. Run the schema migrations, including `AddEmailMfaChallenges1792444000000` for email-code sign-in:
 
    ```sh
    cd backend
@@ -30,7 +31,7 @@ Requirements: Node.js and PostgreSQL. Local development can use the encrypted lo
    ```
 
 Open the Vite URL printed in the terminal. The development server proxies `/api` to `http://localhost:3000`.
-For a one-command development start from the project root, run `npm run dev`. It starts both services and reuses a healthy backend already listening on port 3000.
+For a one-command development start from the project root, run `npm run dev`. It starts both services, reuses a healthy backend already listening on port 3000, and opens the local frontend when it is ready. In VS Code, the `SecureVault: Start development site` task is configured to run when this trusted workspace folder opens.
 
 Never use the example values as production credentials. In production, use HTTPS and secret-manager supplied signing, encryption, cloud-storage, and SMTP credentials. Keep the backup bucket separate from the primary bucket, restrict its access, and separately back up PostgreSQL metadata; the file backup bucket does not contain user accounts or database records.
 
@@ -64,16 +65,20 @@ Key rotation is not currently an automatic feature. Do not replace `ENCRYPTION_M
 ## Application flow
 
 - Register an account, then sign in.
-- Every account must enroll a TOTP authenticator at first sign-in and provide a current six-digit code. The MFA secret is encrypted at rest with `ENCRYPTION_MASTER_KEY`; enrollment challenges expire after five minutes and a TOTP time-step cannot be reused.
+- Every sign-in requires the account password and a six-digit email code sent to the account address. The email code is HMAC-hashed at rest, expires after five minutes, and cannot be reused. Legacy authenticator records are left unchanged and are no longer used for sign-in. Email-based MFA depends on the security of the user's mailbox and the configured SMTP service; it is not phishing-resistant.
 - Successful MFA verification issues short-lived access and rotating refresh cookies. Both are `HttpOnly` and `SameSite=Strict`; cookies are `Secure` in production. “Remember me” controls whether the refresh cookie persists for up to seven days; otherwise it is a browser-session cookie with a 12-hour server-side lifetime. Logout revokes all active refresh sessions for the account and invalidates existing access tokens; password reset also invalidates sessions.
 - Login is limited to five attempts per IP in 15 minutes, MFA verification to six attempts per IP in 15 minutes, and an account is locked for 15 minutes after five failed password attempts. Role and session-version claims are checked against the database on authenticated requests so role changes and revocation take effect immediately.
 - Administrators can change another account's `USER`/`ADMIN` role at `PATCH /api/v1/admin/users/:userId/role`; the last administrator cannot be demoted and accounts whose role changes have their sessions revoked. Changes are recorded in the audit trail.
+- The `/admin` console uses authenticated `GET /api/v1/admin/overview` and paginated/searchable `GET /api/v1/admin/users` endpoints. Both endpoints, like role changes, validate the current account role server-side. The console displays persisted user/file/share/backup totals and recorded audit events; it does not expose account disabling because the backend has no disabled-account state.
+- The authenticated `GET /api/v1/files/overview` endpoint reports the signed-in user's active owned-file count and metadata size, active inbound/outbound shares, backup-record statuses, account identity, and legacy authenticator enrollment flag. The dashboard gets recent recorded activity separately from `/api/v1/audit`. Storage quota is not configured. These are database-recorded values, not provider-side object measurements.
 - The protected file vault supports encrypted upload, listing, download/decryption, and deletion. AES-256-GCM authentication tags and metadata are checked before plaintext is released; modified ciphertext, tags, or malformed metadata are rejected. Each successful upload is copied as authenticated ciphertext to the backup store; file owners can restore a verified backup from the vault. The API rejects noncanonical base64 and files larger than 700 KB.
 - Owners can grant another registered account `VIEW` or `DOWNLOAD` access to a file, optionally with an expiry, and can revoke grants. Shared users see eligible files in their vault; only owners can manage permissions or delete files. Downloads are authorized against the current owner or an active, unexpired `DOWNLOAD` grant for that recipient; `VIEW` grants do not allow downloading.
 - Security activity is available at `/api/v1/audit` and in the dashboard. Users see their own events; accounts with the `ADMIN` role see the latest 100 events across the system. Events include account/session and file/share actions.
 - Audit events form a SHA-256 hash chain and the database rejects updates/deletes to audit rows. Administrators can check the chain at `GET /api/v1/audit/integrity`. This is tamper-evident and append-only for the application database role; it is not a substitute for exporting logs to independently controlled immutable storage.
 - With SMTP and `SECURITY_ALERT_EMAILS` configured, SecureVault emails security contacts for repeated failed sign-ins, rapid downloads, administrator role changes, unauthorized resource access, and detected audit-chain damage. Failed-login alerts trigger at five events from an IP in ten minutes; download alerts trigger at ten files per account in five minutes. Alerts are rate-limited to one per category/key every 15 minutes.
 - Password recovery sends a one-time, one-hour reset link via the configured SMTP server. Reset links are stored as hashes, and a successful reset revokes active refresh sessions.
+- The user dashboard can request a password-reset link through the existing email recovery flow and reports email-code sign-in. Listing/revoking individual sessions is not implemented as account settings.
+- Administrator health shows the API and database status from the live health check and reports storage provider/configuration separately. Storage object/disk connectivity is explicitly **not checked** by the admin overview. Backup counts describe database backup records and do not prove that backup objects can be restored; restoration still needs a controlled recovery test.
 
 ## Security and resilience requirements
 
@@ -81,7 +86,7 @@ This section describes the target security framework for SecureVault. It is a se
 
 ### Identity, access, and application security
 
-- Require strong user authentication, least-privilege role-based authorization, and multi-factor authentication for accounts and privileged actions. TOTP enrollment and verification are implemented for sign-in; authenticated file access checks current role and session version.
+- Require strong user authentication, least-privilege role-based authorization, and multi-factor authentication for accounts and privileged actions. Email-code MFA is used for sign-in; authenticated file access checks current role and session version. Prefer phishing-resistant authenticators for high-assurance deployments.
 - Protect sessions with secure cookie attributes, short-lived credentials, rotation and revocation, and defenses against session fixation and theft. Apply rate limits and progressive protections against brute-force login and password-reset attempts.
 - Enforce authorization on every API operation and validate, normalize, and safely handle all untrusted input. Use parameterized database access and context-appropriate output encoding to mitigate injection, cross-site scripting, and related attacks.
 - Require HTTPS/TLS for deployed services, apply secure HTTP headers, protect secrets through a managed secret store, and keep dependencies and runtime components patched. Run dependency and vulnerability scans as part of maintenance and deployment.
@@ -142,16 +147,16 @@ npm run lint
 npm audit --audit-level=high
 ```
 
-The backend tests cover session cookie attributes and parsing, TOTP verification and encrypted MFA-secret storage, production environment requirements, authenticated encryption/decryption, ciphertext/tag/metadata tamper rejection, upload allowlist/content checks, audit-hash determinism, CORS security headers, and health-route behavior. Production also requires a working ClamAV scanner and up-to-date signatures. A full cloud-backed demonstration also requires a reachable PostgreSQL server, applied migrations, valid signing/encryption keys, two configured object-storage buckets, and SMTP credentials for password recovery and security alerts.
+The backend tests cover session cookie attributes and parsing, email MFA challenge expiry, one-time use, attempt limits, login lockout, and legacy TOTP utility vectors, production environment requirements, authenticated encryption/decryption, ciphertext/tag/metadata tamper rejection, upload allowlist/content checks, audit-hash determinism, CORS security headers, health-route behavior, and admin authorization checks. The admin and personal overview routes also have unauthenticated-request coverage; database-backed aggregation, role changes, and browser UI flows require integration tests against a disposable test database and are not verified by the current automated suite. Production also requires a working ClamAV scanner and up-to-date signatures. A full cloud-backed demonstration also requires a reachable PostgreSQL server, applied migrations, valid signing/encryption keys, two configured object-storage buckets, and SMTP credentials for sign-in codes, password recovery, and security alerts.
 
 ## Presentation walkthrough
 
 1. Show the landing page and account registration.
-2. Sign in and enroll a TOTP authenticator, then verify a code. Sign in again with “Remember me” both off and on; show that session credentials are not stored in browser local storage.
+2. Sign in using the password and email code. Sign in again with “Remember me” both off and on; show that session credentials are not stored in browser local storage.
 3. Upload a small file, confirm it appears in the vault, download it, and compare the downloaded content with the original.
 4. Share a file with a second registered account as `VIEW` and then `DOWNLOAD`; verify that view-only recipients cannot download, and revoke access.
 5. Review recent security activity, then delete a file and verify it disappears from the list.
-6. Show password recovery using a configured SMTP inbox.
+6. Show email-code sign-in and password recovery using a configured SMTP inbox.
 7. Show the backend test results and the PostgreSQL migration status.
 
 Capture presentation screenshots from the running app with a configured database; screenshots of mocked browser responses are not evidence of database-backed operation.

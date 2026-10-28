@@ -34,6 +34,81 @@ export interface EnvironmentConfig {
   readonly databaseBackupBucket?: string
   readonly databaseBackupAccessKeyId?: string
   readonly databaseBackupSecretAccessKey?: string
+  readonly securityDetection?: SecurityDetectionConfig
+}
+
+export interface SecurityDetectionConfig {
+  readonly failedLoginThreshold: number
+  readonly mfaFailureThreshold: number
+  readonly unauthorizedAccessThreshold: number
+  readonly distinctFileAccessThreshold: number
+  readonly downloadThreshold: number
+  readonly shareChangeThreshold: number
+  readonly cooldownMinutes: number
+}
+
+const defaultSecurityDetection: SecurityDetectionConfig = Object.freeze({
+  failedLoginThreshold: 5,
+  mfaFailureThreshold: 6,
+  unauthorizedAccessThreshold: 4,
+  distinctFileAccessThreshold: 5,
+  downloadThreshold: 10,
+  shareChangeThreshold: 8,
+  cooldownMinutes: 15,
+})
+
+function parseDetectionThreshold(
+  source: NodeJS.ProcessEnv,
+  key: string,
+  defaultValue: number,
+): number {
+  const configured = optionalValue(source, key)
+  if (!configured) return defaultValue
+  const parsed = Number(configured)
+  if (!Number.isSafeInteger(parsed) || parsed < 2 || parsed > 100) {
+    throw new Error(`${key} must be an integer between 2 and 100`)
+  }
+  return parsed
+}
+
+function loadSecurityDetection(source: NodeJS.ProcessEnv): SecurityDetectionConfig {
+  return Object.freeze({
+    failedLoginThreshold: parseDetectionThreshold(
+      source,
+      'SECURITY_FAILED_LOGIN_THRESHOLD',
+      defaultSecurityDetection.failedLoginThreshold,
+    ),
+    mfaFailureThreshold: parseDetectionThreshold(
+      source,
+      'SECURITY_MFA_FAILURE_THRESHOLD',
+      defaultSecurityDetection.mfaFailureThreshold,
+    ),
+    unauthorizedAccessThreshold: parseDetectionThreshold(
+      source,
+      'SECURITY_UNAUTHORIZED_ACCESS_THRESHOLD',
+      defaultSecurityDetection.unauthorizedAccessThreshold,
+    ),
+    distinctFileAccessThreshold: parseDetectionThreshold(
+      source,
+      'SECURITY_DISTINCT_FILE_ACCESS_THRESHOLD',
+      defaultSecurityDetection.distinctFileAccessThreshold,
+    ),
+    downloadThreshold: parseDetectionThreshold(
+      source,
+      'SECURITY_DOWNLOAD_THRESHOLD',
+      defaultSecurityDetection.downloadThreshold,
+    ),
+    shareChangeThreshold: parseDetectionThreshold(
+      source,
+      'SECURITY_SHARE_CHANGE_THRESHOLD',
+      defaultSecurityDetection.shareChangeThreshold,
+    ),
+    cooldownMinutes: parseDetectionThreshold(
+      source,
+      'SECURITY_DETECTION_COOLDOWN_MINUTES',
+      defaultSecurityDetection.cooldownMinutes,
+    ),
+  })
 }
 
 function requiredValue(source: NodeJS.ProcessEnv, key: string): string {
@@ -312,6 +387,7 @@ export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Enviro
     port,
     corsOrigin,
     databaseUrl,
+    securityDetection: loadSecurityDetection(source),
     ...storage,
     jwtAccessSecret: optionalValue(source, 'JWT_ACCESS_SECRET'),
     jwtRefreshSecret: optionalValue(source, 'JWT_REFRESH_SECRET'),

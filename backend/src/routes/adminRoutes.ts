@@ -2,6 +2,14 @@ import { Router } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import type { DataSource } from 'typeorm'
 import type { EnvironmentConfig } from '../config/environment.js'
+import {
+  createAdminOverviewController,
+  createAdminUsersController,
+} from '../controllers/adminDashboardController.js'
+import {
+  createAdminSecurityAlertStatusController,
+  createAdminSecurityAlertsController,
+} from '../controllers/adminSecurityAlertController.js'
 import { createChangeUserRoleController } from '../controllers/adminController.js'
 import { createAuthMiddleware } from '../middleware/authMiddleware.js'
 
@@ -18,6 +26,26 @@ const roleChangeRateLimit = rateLimit({
 
 export function createAdminRoutes(dataSource: DataSource, environment: EnvironmentConfig): Router {
   const router = Router()
+  router.get(
+    '/overview',
+    createAuthMiddleware(environment, dataSource),
+    createAdminOverviewController(dataSource, environment),
+  )
+  router.get(
+    '/users',
+    createAuthMiddleware(environment, dataSource),
+    createAdminUsersController(dataSource),
+  )
+  router.get(
+    '/alerts',
+    createAuthMiddleware(environment, dataSource),
+    createAdminSecurityAlertsController(dataSource),
+  )
+  router.patch(
+    '/alerts/:alertId/status',
+    createAuthMiddleware(environment, dataSource),
+    createAdminSecurityAlertStatusController(dataSource, environment),
+  )
   router.patch(
     '/users/:userId/role',
     roleChangeRateLimit,

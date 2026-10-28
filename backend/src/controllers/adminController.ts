@@ -1,11 +1,11 @@
-import type { Request, RequestHandler } from 'express'
+import type { RequestHandler } from 'express'
 import type { DataSource } from 'typeorm'
 import { IsNull } from 'typeorm'
 import type { EnvironmentConfig } from '../config/environment.js'
 import { AuditAction } from '../entities/AuditLog.js'
 import { RefreshToken } from '../entities/RefreshToken.js'
 import { User, UserRole } from '../entities/User.js'
-import type { AuthenticatedRequest } from '../middleware/authMiddleware.js'
+import { requireAdminId } from '../middleware/adminAuthorization.js'
 import { writeAuditLog, verifyAuditLogIntegrity } from '../services/auditLog.service.js'
 import { dispatchSecurityAlert } from '../services/securityAlert.service.js'
 import { HttpError } from '../types/http.js'
@@ -13,23 +13,12 @@ import { logger } from '../utils/logger.js'
 
 const roleChangeLockId = 8192442
 
-function getAdminId(request: Request): string {
-  const authenticatedUser = (request as AuthenticatedRequest).user
-  if (!authenticatedUser) {
-    throw new HttpError(401, 'Please sign in to continue.')
-  }
-  if (authenticatedUser.role !== UserRole.ADMIN) {
-    throw new HttpError(403, 'Administrator access is required.')
-  }
-  return authenticatedUser.id
-}
-
 export function createAuditIntegrityController(
   dataSource: DataSource,
   environment: EnvironmentConfig,
 ): RequestHandler {
   return async (request, response) => {
-    getAdminId(request)
+    requireAdminId(request)
     const result = await verifyAuditLogIntegrity(dataSource.manager)
     if (!result.valid) {
       logger.error(
@@ -71,7 +60,7 @@ export function createChangeUserRoleController(
   environment: EnvironmentConfig,
 ): RequestHandler {
   return async (request, response) => {
-    const adminId = getAdminId(request)
+    const adminId = requireAdminId(request)
     const targetId = request.params.userId
     const role = typeof request.body === 'object' && request.body !== null
       ? (request.body as Record<string, unknown>).role

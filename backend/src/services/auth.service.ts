@@ -1,27 +1,30 @@
 import {
+  createHmac,
   createHash,
   randomBytes,
+  randomInt,
+  randomUUID,
   scrypt,
   timingSafeEqual,
 } from 'node:crypto'
 import type { DataSource } from 'typeorm'
 import { IsNull } from 'typeorm'
 import jwt from 'jsonwebtoken'
+import nodemailer from 'nodemailer'
 import type { EnvironmentConfig } from '../config/environment.js'
+import { EmailMfaChallenge } from '../entities/EmailMfaChallenge.js'
 import { RefreshToken } from '../entities/RefreshToken.js'
 import { User } from '../entities/User.js'
 import { HttpError } from '../types/http.js'
-import {
-  createTotpProvisioningUri,
-  createTotpSecret,
-  decryptTotpSecret,
-  encryptTotpSecret,
-  verifyTotp,
-} from './totp.service.js'
+import { logger } from '../utils/logger.js'
 
 const passwordKeyLength = 64
 const accessTokenLifetime = '15m'
 const mfaChallengeLifetime = '5m'
+const emailMfaCodeLifetimeMs = 5 * 60 * 1000
+const emailMfaResendDelayMs = 60 * 1000
+const maximumEmailMfaSends = 3
+const maximumEmailMfaAttempts = 5
 const persistentRefreshLifetimeMs = 7 * 24 * 60 * 60 * 1000
 const sessionRefreshLifetimeMs = 12 * 60 * 60 * 1000
 const maximumFailedLogins = 5
@@ -86,7 +89,6 @@ export async function loginUser(
   email: string,
   password: string,
   rememberMe = false,
-  restartMfaSetup = false,
 ) {
   if (!environment.jwtAccessSecret || !environment.jwtRefreshSecret) {
     throw new HttpError(503, 'Authentication is not configured yet.')
@@ -97,7 +99,6 @@ export async function loginUser(
       .getRepository(User)
       .createQueryBuilder('user')
       .addSelect('user.passwordHash')
-      .addSelect('user.mfaSecret')
       .setLock('pessimistic_write')
       .where('user.email = :email', { email: email.trim().toLowerCase() })
       .getOne()
@@ -126,9 +127,6 @@ export async function loginUser(
 
     user.failedLoginAttempts = 0
     user.loginLockedUntil = null
-    if (!user.mfaEnabled && (!user.mfaSecret || restartMfaSetup)) {
-      user.mfaSecret = encryptTotpSecret(createTotpSecret(), environment)
-    }
     await manager.getRepository(User).save(user)
 
     return { authenticated: true as const, user }
@@ -137,9 +135,7 @@ export async function loginUser(
   if (!loginResult.authenticated) {
     throw new HttpError(401, 'Invalid email or password.')
   }
-
   const user = loginResult.user
-  const mfaSecret = decryptTotpSecret(user.mfaSecret!, environment)
   const challengeToken = jwt.sign(
     {
       tokenType: 'mfa-challenge',
@@ -147,19 +143,12 @@ export async function loginUser(
       persistent: rememberMe,
     },
     environment.jwtAccessSecret,
-    { subject: user.id, expiresIn: mfaChallengeLifetime },
+    { subject: user.id, jwtid: randomUUID(), expiresIn: mfaChallengeLifetime },
   )
 
   return {
     mfaRequired: true as const,
-    mfaSetupRequired: !user.mfaEnabled,
     challengeToken,
-    ...(user.mfaEnabled
-      ? {}
-      : {
-          provisioningUri: createTotpProvisioningUri(mfaSecret, user.email),
-          manualSecret: mfaSecret,
-        }),
     persistent: rememberMe,
   }
 }
@@ -222,7 +211,172 @@ async function createSession(
   }
 }
 
-export async function completeMfaLogin(
+type VerifiedEmailMfaChallenge = jwt.JwtPayload & {
+  sub: string
+  jti: string
+  authVersion: number
+  persistent: boolean
+}
+
+function verifyEmailMfaChallenge(
+  environment: EnvironmentConfig,
+  challengeToken: string,
+): VerifiedEmailMfaChallenge {
+  if (!environment.jwtAccessSecret) {
+    throw new HttpError(503, 'Authentication is not configured yet.')
+  }
+
+  let verified: string | jwt.JwtPayload
+  try {
+    verified = jwt.verify(challengeToken, environment.jwtAccessSecret)
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      throw new HttpError(401, 'Your sign-in challenge has expired. Please sign in again.')
+    }
+    if (error instanceof jwt.JsonWebTokenError) {
+      throw new HttpError(401, 'Your sign-in challenge is invalid. Please sign in again.')
+    }
+    throw error
+  }
+
+  if (
+    typeof verified === 'string' ||
+    typeof verified.sub !== 'string' ||
+    typeof verified.jti !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(verified.jti) ||
+    verified.tokenType !== 'mfa-challenge' ||
+    typeof verified.authVersion !== 'number' ||
+    typeof verified.persistent !== 'boolean'
+  ) {
+    throw new HttpError(401, 'Your sign-in challenge is invalid. Please sign in again.')
+  }
+  return {
+    ...verified,
+    sub: verified.sub,
+    jti: verified.jti,
+    authVersion: verified.authVersion,
+    persistent: verified.persistent,
+  }
+}
+
+function hashEmailMfaCode(secret: string, challengeId: string, code: string): string {
+  return createHmac('sha256', secret)
+    .update(`securevault-email-mfa:${challengeId}:${code}`)
+    .digest('hex')
+}
+
+function emailMfaCodeMatches(
+  secret: string,
+  challengeId: string,
+  code: string,
+  storedHash: string,
+): boolean {
+  if (!/^[a-f0-9]{64}$/i.test(storedHash)) return false
+  const expected = Buffer.from(hashEmailMfaCode(secret, challengeId, code), 'hex')
+  const actual = Buffer.from(storedHash, 'hex')
+  return timingSafeEqual(expected, actual)
+}
+
+function getEmailMfaSmtpConfig(environment: EnvironmentConfig) {
+  const { smtpHost, smtpPort, smtpUser, smtpPassword, smtpFrom } = environment
+  if (!smtpHost || !smtpPort || !smtpUser || !smtpPassword || !smtpFrom) {
+    throw new HttpError(503, 'Email verification is not configured. Please contact support.')
+  }
+  return { host: smtpHost, port: smtpPort, user: smtpUser, password: smtpPassword, from: smtpFrom }
+}
+
+export async function requestEmailMfaCode(
+  dataSource: DataSource,
+  environment: EnvironmentConfig,
+  challengeToken: string,
+): Promise<void> {
+  const payload = verifyEmailMfaChallenge(environment, challengeToken)
+  const smtp = getEmailMfaSmtpConfig(environment)
+  const secret = environment.jwtAccessSecret
+  if (!secret) {
+    throw new HttpError(503, 'Authentication is not configured yet.')
+  }
+  const now = new Date()
+  const code = randomInt(0, 1_000_000).toString().padStart(6, '0')
+
+  const email = await dataSource.transaction(async (manager) => {
+    const user = await manager.getRepository(User).findOne({
+      where: { id: payload.sub },
+      lock: { mode: 'pessimistic_write' },
+    })
+    if (
+      !user ||
+      user.authVersion !== payload.authVersion ||
+      (user.loginLockedUntil !== null && user.loginLockedUntil > now)
+    ) {
+      throw new HttpError(401, 'Your sign-in challenge is invalid. Please sign in again.')
+    }
+
+    const challenges = manager.getRepository(EmailMfaChallenge)
+    const existing = await challenges.findOne({
+      where: { challengeId: payload.jti, userId: user.id },
+      lock: { mode: 'pessimistic_write' },
+    })
+    if (existing) {
+      if (existing.consumedAt || existing.expiresAt <= now || existing.attempts >= maximumEmailMfaAttempts) {
+        throw new HttpError(401, 'Your sign-in challenge is invalid. Please sign in again.')
+      }
+      if (now.getTime() - existing.sentAt.getTime() < emailMfaResendDelayMs) {
+        throw new HttpError(429, 'Please wait before requesting another email code.')
+      }
+      if (existing.sendCount >= maximumEmailMfaSends) {
+        throw new HttpError(429, 'No more email codes can be sent for this sign-in. Please sign in again.')
+      }
+      existing.codeHash = hashEmailMfaCode(secret, payload.jti, code)
+      existing.expiresAt = new Date(now.getTime() + emailMfaCodeLifetimeMs)
+      existing.sentAt = now
+      existing.sendCount += 1
+      await challenges.save(existing)
+    } else {
+      await challenges.save(challenges.create({
+        challengeId: payload.jti,
+        userId: user.id,
+        codeHash: hashEmailMfaCode(secret, payload.jti, code),
+        expiresAt: new Date(now.getTime() + emailMfaCodeLifetimeMs),
+        sentAt: now,
+        sendCount: 1,
+        attempts: 0,
+        consumedAt: null,
+      }))
+    }
+    return user.email
+  })
+
+  const transport = nodemailer.createTransport({
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.port === 465,
+    requireTLS: smtp.port !== 465,
+    auth: { user: smtp.user, pass: smtp.password },
+  })
+  try {
+    await transport.sendMail({
+      from: smtp.from,
+      to: email,
+      subject: 'Your SecureVault sign-in code',
+      text: `Your SecureVault sign-in code is ${code}. It expires in five minutes. If you did not request this code, you can ignore this message.`,
+      html: `<p>Your SecureVault sign-in code is:</p><p><strong>${code}</strong></p><p>It expires in five minutes. If you did not request this code, you can ignore this message.</p>`,
+    })
+  } catch (error) {
+    logger.error(
+      {
+        event: 'mfa_email.delivery_failed',
+        errorType: error instanceof Error ? error.name : 'UnknownError',
+      },
+      'Email MFA code could not be delivered',
+    )
+    throw new HttpError(503, 'The verification email could not be sent. Please try again later.')
+  } finally {
+    transport.close()
+  }
+}
+
+export async function completeEmailMfaLogin(
   dataSource: DataSource,
   environment: EnvironmentConfig,
   challengeToken: string,
@@ -231,90 +385,53 @@ export async function completeMfaLogin(
   if (!environment.jwtAccessSecret || !environment.jwtRefreshSecret) {
     throw new HttpError(503, 'Authentication is not configured yet.')
   }
-  let payload: jwt.JwtPayload
-  try {
-    const verified = jwt.verify(challengeToken, environment.jwtAccessSecret)
-    if (typeof verified === 'string') {
-      throw new Error('Invalid MFA challenge payload')
-    }
-    payload = verified
-  } catch {
-    throw new HttpError(401, 'Your sign-in challenge has expired. Please sign in again.')
-  }
-
-  if (
-    typeof payload.sub !== 'string' ||
-    payload.tokenType !== 'mfa-challenge' ||
-    typeof payload.persistent !== 'boolean' ||
-    typeof payload.authVersion !== 'number'
-  ) {
-    throw new HttpError(401, 'Your sign-in challenge is invalid. Please sign in again.')
-  }
-
-  const users = dataSource.getRepository(User)
-  const user = await users
-    .createQueryBuilder('user')
-    .addSelect('user.mfaSecret')
-    .where('user.id = :id', { id: payload.sub })
-    .getOne()
-  if (
-    !user ||
-    user.authVersion !== payload.authVersion ||
-    !user.mfaSecret ||
-    (user.loginLockedUntil !== null && user.loginLockedUntil > new Date())
-  ) {
-    throw new HttpError(401, 'Your sign-in challenge is invalid. Please sign in again.')
-  }
-
-  const secret = decryptTotpSecret(user.mfaSecret, environment)
-  const matchedStep = verifyTotp(secret, code)
-  if (matchedStep === undefined) {
-    await dataSource.transaction(async (manager) => {
-      const lockedUser = await manager.getRepository(User).findOne({
-        where: { id: user.id },
-        lock: { mode: 'pessimistic_write' },
-      })
-      if (!lockedUser || (lockedUser.loginLockedUntil && lockedUser.loginLockedUntil > new Date())) {
-        return
-      }
-      if (lockedUser.loginLockedUntil) {
-        lockedUser.failedLoginAttempts = 0
-        lockedUser.loginLockedUntil = null
-      }
-      lockedUser.failedLoginAttempts += 1
-      if (lockedUser.failedLoginAttempts >= maximumFailedLogins) {
-        lockedUser.loginLockedUntil = new Date(Date.now() + loginLockoutMs)
-      }
-      await manager.getRepository(User).save(lockedUser)
+  const secret = environment.jwtAccessSecret
+  const payload = verifyEmailMfaChallenge(environment, challengeToken)
+  const result = await dataSource.transaction(async (manager) => {
+    const user = await manager.getRepository(User).findOne({
+      where: { id: payload.sub },
+      lock: { mode: 'pessimistic_write' },
     })
-    throw new HttpError(401, 'The verification code is invalid. Please try again.')
-  }
-
-  await dataSource.transaction(async (manager) => {
-    const result = await manager.getRepository(User).createQueryBuilder()
-      .update(User)
-      .set({
-        mfaEnabled: true,
-        mfaLastUsedStep: String(matchedStep),
-        failedLoginAttempts: 0,
-        loginLockedUntil: null,
-      })
-      .where('"id" = :id AND "auth_version" = :authVersion AND "mfa_last_used_step" < :step', {
-        id: user.id,
-        authVersion: payload.authVersion,
-        step: matchedStep,
-      })
-      .execute()
-    if (result.affected !== 1) {
-      throw new HttpError(401, 'This verification code has already been used. Please try the current code.')
+    const challenge = await manager.getRepository(EmailMfaChallenge).findOne({
+      where: { challengeId: payload.jti, userId: payload.sub },
+      lock: { mode: 'pessimistic_write' },
+    })
+    const now = new Date()
+    if (
+      !user ||
+      user.authVersion !== payload.authVersion ||
+      (user.loginLockedUntil !== null && user.loginLockedUntil > now) ||
+      !challenge ||
+      challenge.consumedAt ||
+      challenge.expiresAt <= now ||
+      challenge.attempts >= maximumEmailMfaAttempts
+    ) {
+      return { authenticated: false as const }
     }
+
+    if (!emailMfaCodeMatches(secret, payload.jti, code, challenge.codeHash)) {
+      challenge.attempts += 1
+      user.failedLoginAttempts += 1
+      if (user.failedLoginAttempts >= maximumFailedLogins) {
+        user.loginLockedUntil = new Date(now.getTime() + loginLockoutMs)
+      }
+      await manager.getRepository(EmailMfaChallenge).save(challenge)
+      await manager.getRepository(User).save(user)
+      return { authenticated: false as const }
+    }
+
+    challenge.consumedAt = now
+    user.failedLoginAttempts = 0
+    user.loginLockedUntil = null
+    await manager.getRepository(EmailMfaChallenge).save(challenge)
+    await manager.getRepository(User).save(user)
+    return { authenticated: true as const, user }
   })
 
-  const updatedUser = await users.findOneBy({ id: user.id })
-  if (!updatedUser) {
-    throw new HttpError(401, 'Your account is unavailable. Please sign in again.')
+  if (!result.authenticated) {
+    throw new HttpError(401, 'The email verification code is invalid or expired. Please try again.')
   }
-  return createSession(dataSource, environment, updatedUser, payload.persistent)
+  return createSession(dataSource, environment, result.user, payload.persistent)
 }
 
 export async function refreshUserSession(

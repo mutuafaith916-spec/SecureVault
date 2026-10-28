@@ -6,6 +6,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  type Relation,
 } from 'typeorm'
 import { FileEntity } from './File.js'
 import { User } from './User.js'
@@ -46,13 +47,13 @@ export class FileShare {
 
   @ManyToOne(() => FileEntity, (file) => file.shares, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'file_id', foreignKeyConstraintName: 'FK_file_shares_file' })
-  file!: FileEntity
+  file!: Relation<FileEntity>
 
   @ManyToOne(() => User, (user) => user.sharesCreated, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'shared_by', foreignKeyConstraintName: 'FK_file_shares_shared_by' })
-  sharedByUser!: User
+  sharedByUser!: Relation<User>
 
   @ManyToOne(() => User, (user) => user.sharesReceived, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'shared_with', foreignKeyConstraintName: 'FK_file_shares_shared_with' })
-  sharedWithUser!: User
+  sharedWithUser!: Relation<User>
 }

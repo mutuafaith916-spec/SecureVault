@@ -13,10 +13,7 @@ type AuthResponse = {
   message?: string
   user?: AuthUser
   mfaRequired?: boolean
-  mfaSetupRequired?: boolean
   challengeToken?: string
-  provisioningUri?: string
-  manualSecret?: string
 }
 
 type Feedback = { type: 'success' | 'error'; message: string }
@@ -26,10 +23,6 @@ function LoginPage() {
   const [password, setPassword] = useState('')
   const [mfaCode, setMfaCode] = useState('')
   const [mfaChallenge, setMfaChallenge] = useState('')
-  const [mfaSetupRequired, setMfaSetupRequired] = useState(false)
-  const [restartMfaSetup, setRestartMfaSetup] = useState(false)
-  const [mfaProvisioningUri, setMfaProvisioningUri] = useState('')
-  const [mfaManualSecret, setMfaManualSecret] = useState('')
   const [forgotEmail, setForgotEmail] = useState('')
   const [passwordVisible, setPasswordVisible] = useState(false)
   const [remember, setRemember] = useState(false)
@@ -103,7 +96,7 @@ function LoginPage() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, rememberMe: remember, restartMfaSetup }),
+        body: JSON.stringify({ email, password, rememberMe: remember }),
       })
       const result = await response.json() as AuthResponse
 
@@ -117,10 +110,6 @@ function LoginPage() {
 
       if (result.mfaRequired && result.challengeToken) {
         setMfaChallenge(result.challengeToken)
-        setMfaSetupRequired(result.mfaSetupRequired === true)
-        setMfaProvisioningUri(result.provisioningUri || '')
-        setMfaManualSecret(result.manualSecret || '')
-        setRestartMfaSetup(false)
         setPassword('')
         setFeedback({ type: 'success', message: result.message || 'Verify your sign-in to continue.' })
         return
@@ -148,7 +137,7 @@ function LoginPage() {
     setFeedback(null)
     setIsSubmitting(true)
     try {
-      const response = await fetch('/api/v1/auth/mfa/verify', {
+      const response = await fetch('/api/v1/auth/mfa/email/verify', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -156,6 +145,15 @@ function LoginPage() {
       })
       const result = await response.json() as AuthResponse
       if (!response.ok || !result.success || !result.user) {
+        if (response.status === 401 && result.message?.toLowerCase().includes('sign-in challenge')) {
+          setMfaChallenge('')
+          setMfaCode('')
+          setFeedback({
+            type: 'error',
+            message: `${result.message} Enter your password again to start a fresh verification request.`,
+          })
+          return
+        }
         setFeedback({
           type: 'error',
           message: result.message || 'The verification code was not accepted. Please try again.',
@@ -165,9 +163,37 @@ function LoginPage() {
       setUser(result.user)
       setMfaChallenge('')
       setMfaCode('')
-      setMfaManualSecret('')
-      setMfaProvisioningUri('')
       setFeedback({ type: 'success', message: result.message || 'You have signed in successfully.' })
+    } catch {
+      setFeedback({
+        type: 'error',
+        message: 'We could not reach SecureVault. Please check your connection and try again.',
+      })
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  async function handleEmailMfaRequest() {
+    setFeedback(null)
+    setIsSubmitting(true)
+    try {
+      const response = await fetch('/api/v1/auth/mfa/email/request', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ challengeToken: mfaChallenge }),
+      })
+      const result = await response.json() as AuthResponse
+      if (!response.ok || !result.success) {
+        setFeedback({
+          type: 'error',
+          message: result.message || 'We could not send an email verification code. Please try again.',
+        })
+        return
+      }
+      setMfaCode('')
+      setFeedback({ type: 'success', message: result.message || 'Check your email for a verification code.' })
     } catch {
       setFeedback({
         type: 'error',
@@ -272,9 +298,7 @@ function LoginPage() {
               {user
                 ? `Signed in as ${user.email}`
                 : mfaChallenge
-                  ? mfaSetupRequired
-                    ? 'Set up an authenticator app to protect your account.'
-                    : 'Enter the current code from your authenticator app.'
+                  ? 'Enter the verification code sent to your email.'
                   : 'Enter your details to access your secure space.'}
             </p>
 
@@ -294,17 +318,8 @@ function LoginPage() {
               </div>
             ) : mfaChallenge ? (
               <form className="auth-form" onSubmit={handleMfaSubmit}>
-                {mfaSetupRequired && (
-                  <div className="form-feedback" role="status">
-                    <strong>Set up an authenticator app</strong>
-                    <p>Scan this setup link in your app, or enter the key manually:</p>
-                    <p><code>{mfaManualSecret}</code></p>
-                    <a href={mfaProvisioningUri}>Open authenticator setup</a>
-                    <p>Enter the six-digit code shown by the app to finish setup. Starting over with your password creates a new key and invalidates this one.</p>
-                  </div>
-                )}
                 <label className="form-field">
-                  <span>Authenticator code</span>
+                  <span>Email verification code</span>
                   <input
                     type="text"
                     name="mfaCode"
@@ -326,25 +341,27 @@ function LoginPage() {
                   </p>
                 )}
                 <button className="button auth-submit" type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? 'Verifying…' : mfaSetupRequired ? 'Finish setup' : 'Verify and sign in'}
+                  {isSubmitting ? 'Verifying…' : 'Verify and sign in'}
                   <span aria-hidden="true">{isSubmitting ? '' : '→'}</span>
                 </button>
                 <button
                   className="text-button"
                   type="button"
+                  onClick={() => void handleEmailMfaRequest()}
+                  disabled={isSubmitting}
+                >
+                  Resend code to email
+                </button>
+                <button
+                  className="text-button"
+                  type="button"
                   onClick={() => {
-                    if (mfaSetupRequired) {
-                      setRestartMfaSetup(true)
-                    }
                     setMfaChallenge('')
                     setMfaCode('')
-                    setMfaSetupRequired(false)
-                    setMfaProvisioningUri('')
-                    setMfaManualSecret('')
                     setFeedback(null)
                   }}
                 >
-                  {mfaSetupRequired ? 'Start over with a new key' : 'Back to password'}
+                  Back to password
                 </button>
               </form>
             ) : (

@@ -6,6 +6,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  type Relation,
 } from 'typeorm'
 import { User } from './User.js'
 
@@ -33,5 +34,5 @@ export class PasswordResetToken {
 
   @ManyToOne(() => User, { nullable: false, onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id', foreignKeyConstraintName: 'FK_password_reset_tokens_user' })
-  user!: User
+  user!: Relation<User>
 }

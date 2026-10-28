@@ -5,6 +5,7 @@ import {
   Index,
   OneToMany,
   PrimaryGeneratedColumn,
+  type Relation,
   UpdateDateColumn,
 } from 'typeorm'
 import { AuditLog } from './AuditLog.js'
@@ -60,17 +61,17 @@ export class User {
   updatedAt!: Date
 
   @OneToMany(() => FileEntity, (file) => file.owner)
-  files!: FileEntity[]
+  files!: Relation<FileEntity[]>
 
   @OneToMany(() => AuditLog, (auditLog) => auditLog.user)
-  auditLogs!: AuditLog[]
+  auditLogs!: Relation<AuditLog[]>
 
   @OneToMany(() => RefreshToken, (refreshToken) => refreshToken.user)
-  refreshTokens!: RefreshToken[]
+  refreshTokens!: Relation<RefreshToken[]>
 
   @OneToMany(() => FileShare, (fileShare) => fileShare.sharedByUser)
-  sharesCreated!: FileShare[]
+  sharesCreated!: Relation<FileShare[]>
 
   @OneToMany(() => FileShare, (fileShare) => fileShare.sharedWithUser)
-  sharesReceived!: FileShare[]
+  sharesReceived!: Relation<FileShare[]>
 }

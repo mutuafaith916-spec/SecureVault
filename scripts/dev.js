@@ -48,6 +48,43 @@ function startService(name, cwd) {
   })
 }
 
+function openBrowser(url) {
+  const command = process.platform === 'win32'
+    ? process.env.ComSpec || 'cmd.exe'
+    : process.platform === 'darwin'
+      ? 'open'
+      : 'xdg-open'
+  const argumentsList = process.platform === 'win32'
+    ? ['/d', '/s', '/c', `start "" "${url}"`]
+    : [url]
+  const browser = spawn(command, argumentsList, {
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  browser.on('error', (error) => {
+    console.error(`Could not open the SecureVault page: ${error.message}`)
+  })
+}
+
+async function waitForFrontend() {
+  const url = 'http://localhost:5173'
+  const deadline = Date.now() + 60_000
+  while (!stopping && Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1500) })
+      if (response.ok) {
+        openBrowser(url)
+        return
+      }
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+  }
+  if (!stopping) {
+    console.error('The frontend did not become ready within 60 seconds.')
+  }
+}
+
 async function isBackendReady() {
   try {
     const response = await fetch('http://localhost:3000/api/v1/health', {
@@ -70,6 +107,7 @@ async function main() {
     startService('backend', path.join(projectRoot, 'backend'))
   }
   startService('frontend', path.join(projectRoot, 'frontend'))
+  void waitForFrontend()
 }
 
 void main()

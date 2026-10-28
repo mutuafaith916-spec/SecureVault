@@ -6,6 +6,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  type Relation,
 } from 'typeorm'
 import { FileEntity } from './File.js'
 import { User } from './User.js'
@@ -30,6 +31,8 @@ export enum AuditAction {
   PRIVILEGE_CHANGED = 'PRIVILEGE_CHANGED',
   DATA_EXPORTED = 'DATA_EXPORTED',
   FILE_PURGED = 'FILE_PURGED',
+  SECURITY_ALERT_REVIEWED = 'SECURITY_ALERT_REVIEWED',
+  SECURITY_ALERT_RESOLVED = 'SECURITY_ALERT_RESOLVED',
 }
 
 @Entity({ name: 'audit_logs' })
@@ -71,9 +74,9 @@ export class AuditLog {
 
   @ManyToOne(() => User, (user) => user.auditLogs, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'user_id', foreignKeyConstraintName: 'FK_audit_logs_user' })
-  user!: User | null
+  user!: Relation<User | null>
 
   @ManyToOne(() => FileEntity, (file) => file.auditLogs, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'file_id', foreignKeyConstraintName: 'FK_audit_logs_file' })
-  file!: FileEntity | null
+  file!: Relation<FileEntity | null>
 }

@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { test } from 'node:test'
-import type { DataSource, EntityManager } from 'typeorm'
-import jwt from 'jsonwebtoken'
 import { loadEnvironment } from '../src/config/environment.js'
-import { User } from '../src/entities/User.js'
-import { completeMfaLogin, hashUserPassword, loginUser } from '../src/services/auth.service.js'
 import {
   createTotpProvisioningUri,
   createTotpSecret,
@@ -88,7 +84,11 @@ test('MFA secrets are randomly generated and encrypted at rest', () => {
   const secret = createTotpSecret()
   const encrypted = encryptTotpSecret(secret, environment)
   assert.notEqual(encrypted, secret)
-  assert.equal(decryptTotpSecret(encrypted, environment), secret)
+  const decrypted = decryptTotpSecret(encrypted, environment)
+  assert.equal(decrypted, secret)
+  const timestamp = Date.now()
+  const code = generateReferenceTotp(decrypted, timestamp)
+  assert.equal(verifyTotp(decrypted, code, timestamp), Math.floor(timestamp / 30_000))
   assert.throws(() => decryptTotpSecret(`${encrypted.slice(0, -1)}x`, environment))
 })
 
@@ -102,157 +102,4 @@ test('authenticator provisioning URI includes the issuer and account label', () 
   assert.equal(uri.searchParams.get('digits'), '6')
   assert.equal(uri.searchParams.get('period'), '30')
   assert.ok(decodeURIComponent(uri.pathname).includes('user@example.test'))
-})
-
-test('pending enrollment keeps its secret stable until an explicit restart', async () => {
-  const passwordHash = await hashUserPassword('test-password')
-  const firstUser = {
-    id: '00000000-0000-4000-8000-000000000001',
-    fullName: 'First User',
-    email: 'first@example.test',
-    passwordHash,
-    role: 'USER',
-    authVersion: 0,
-    failedLoginAttempts: 0,
-    loginLockedUntil: null,
-    mfaSecret: null,
-    mfaEnabled: false,
-    mfaLastUsedStep: '-1',
-  } as User
-  const otherUser = {
-    ...firstUser,
-    id: '00000000-0000-4000-8000-000000000002',
-    email: 'other@example.test',
-    mfaSecret: null,
-  } as User
-  const usersByEmail = new Map([
-    [firstUser.email, firstUser],
-    [otherUser.email, otherUser],
-  ])
-  let selectedEmail = ''
-  const queryBuilder = {
-    addSelect: () => queryBuilder,
-    setLock: () => queryBuilder,
-    where: (_condition: string, parameters: { email: string }) => {
-      selectedEmail = parameters.email
-      return queryBuilder
-    },
-    getOne: async () => usersByEmail.get(selectedEmail) ?? null,
-  }
-  const repository = {
-    createQueryBuilder: () => queryBuilder,
-    save: async (user: User) => user,
-  }
-  const manager = {
-    getRepository: () => repository,
-  } as unknown as EntityManager
-  const dataSource = {
-    transaction: async <T>(operation: (transactionManager: EntityManager) => Promise<T>) =>
-      operation(manager),
-  } as unknown as DataSource
-
-  const initialResult = await loginUser(dataSource, environment, firstUser.email, 'test-password')
-  const initialSecret = decryptTotpSecret(firstUser.mfaSecret!, environment)
-  const repeatedResult = await loginUser(dataSource, environment, firstUser.email, 'test-password')
-  const repeatedSecret = decryptTotpSecret(firstUser.mfaSecret!, environment)
-  const restartedResult = await loginUser(
-    dataSource,
-    environment,
-    firstUser.email,
-    'test-password',
-    false,
-    true,
-  )
-  const restartedSecret = decryptTotpSecret(firstUser.mfaSecret!, environment)
-  const timestamp = 1_700_000_000_000
-  const enrollmentCode = generateReferenceTotp(restartedSecret, timestamp)
-
-  assert.equal(firstUser.mfaEnabled, false)
-  assert.notEqual(firstUser.mfaSecret, null)
-  assert.equal(new URL(initialResult.provisioningUri!).searchParams.get('secret'), initialSecret)
-  assert.equal(new URL(repeatedResult.provisioningUri!).searchParams.get('secret'), initialSecret)
-  assert.equal(repeatedSecret, initialSecret)
-  assert.notEqual(restartedSecret, initialSecret)
-  assert.equal(new URL(restartedResult.provisioningUri!).searchParams.get('secret'), restartedSecret)
-  assert.equal(
-    verifyTotp(restartedSecret, enrollmentCode, timestamp),
-    Math.floor(timestamp / 30_000),
-  )
-  assert.equal(otherUser.mfaSecret, null)
-})
-
-test('MFA enrollment remains pending on invalid code and completes only after valid verification', async () => {
-  const user = {
-    id: '00000000-0000-4000-8000-000000000003',
-    fullName: 'Pending User',
-    email: 'pending@example.test',
-    role: 'USER',
-    authVersion: 0,
-    failedLoginAttempts: 0,
-    loginLockedUntil: null,
-    mfaSecret: encryptTotpSecret('GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ', environment),
-    mfaEnabled: false,
-    mfaLastUsedStep: '-1',
-  } as User
-  let updateValues: Partial<User> = {}
-  const updateBuilder = {
-    update: () => updateBuilder,
-    set: (values: Partial<User>) => {
-      updateValues = values
-      return updateBuilder
-    },
-    where: () => updateBuilder,
-    execute: async () => {
-      const requestedStep = Number(updateValues.mfaLastUsedStep)
-      if (Number(user.mfaLastUsedStep) >= requestedStep) {
-        return { affected: 0 }
-      }
-      Object.assign(user, updateValues)
-      return { affected: 1 }
-    },
-  }
-  const userQueryBuilder = {
-    addSelect: () => userQueryBuilder,
-    where: () => userQueryBuilder,
-    getOne: async () => user,
-  }
-  const userRepository = {
-    createQueryBuilder: () => userQueryBuilder,
-    findOneBy: async () => user,
-  }
-  const transactionRepository = {
-    createQueryBuilder: () => updateBuilder,
-    findOne: async () => user,
-    save: async (updatedUser: User) => Object.assign(user, updatedUser),
-  }
-  const refreshTokenRepository = {
-    create: (refreshToken: object) => refreshToken,
-    save: async (refreshToken: object) => refreshToken,
-  }
-  const dataSource = {
-    getRepository: (entity: typeof User | Function) =>
-      entity === User ? userRepository : refreshTokenRepository,
-    transaction: async (operation: (manager: EntityManager) => Promise<unknown>) =>
-      operation({ getRepository: () => transactionRepository } as unknown as EntityManager),
-  } as unknown as DataSource
-  const challengeToken = jwt.sign(
-    { tokenType: 'mfa-challenge', authVersion: user.authVersion, persistent: false },
-    environment.jwtAccessSecret!,
-    { subject: user.id, expiresIn: '5m' },
-  )
-  const timestamp = Date.now()
-  const secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
-  const validCode = generateReferenceTotp(secret, timestamp)
-  const invalidCode = String((Number(validCode) + 1) % 1_000_000).padStart(6, '0')
-
-  await assert.rejects(
-    completeMfaLogin(dataSource, environment, challengeToken, invalidCode),
-    /verification code is invalid/i,
-  )
-  assert.equal(user.mfaEnabled, false)
-
-  const result = await completeMfaLogin(dataSource, environment, challengeToken, validCode)
-  assert.equal(user.mfaEnabled, true)
-  assert.equal(user.mfaLastUsedStep, String(Math.floor(timestamp / 30_000)))
-  assert.equal(result.user.id, user.id)
 })

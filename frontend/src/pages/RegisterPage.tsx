@@ -85,7 +85,7 @@ function RegisterPage() {
         <aside className="auth-aside register-aside">
           <div className="aside-content">
             <div className="eyebrow"><span className="status-dot" /> START WITH SECURITY</div>
-            <h1>Make room<br />for <span>peace of mind.</span></h1>
+            <h1>Secure your data<br />in the <span>digital age.</span></h1>
             <p>Create your SecureVault and bring your important files into a more private, protected space.</p>
             <div className="privacy-points">
               <div><span>✓</span> Your files, in your control</div>

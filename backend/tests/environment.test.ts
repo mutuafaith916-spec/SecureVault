@@ -18,6 +18,33 @@ test('SMTP settings remain optional when password reset mail is not configured',
   assert.equal(environment.malwareScannerDatabase, undefined)
 })
 
+test('security detection thresholds have safe defaults and reject out-of-range values', () => {
+  const defaults = loadEnvironment(baseEnvironment).securityDetection
+  assert.deepEqual(defaults, {
+    failedLoginThreshold: 5,
+    mfaFailureThreshold: 6,
+    unauthorizedAccessThreshold: 4,
+    distinctFileAccessThreshold: 5,
+    downloadThreshold: 10,
+    shareChangeThreshold: 8,
+    cooldownMinutes: 15,
+  })
+  assert.equal(
+    loadEnvironment({
+      ...baseEnvironment,
+      SECURITY_FAILED_LOGIN_THRESHOLD: '7',
+      SECURITY_DETECTION_COOLDOWN_MINUTES: '30',
+    }).securityDetection?.failedLoginThreshold,
+    7,
+  )
+  for (const invalid of ['1', '101', '2.5', 'nope']) {
+    assert.throws(
+      () => loadEnvironment({ ...baseEnvironment, SECURITY_FAILED_LOGIN_THRESHOLD: invalid }),
+      /SECURITY_FAILED_LOGIN_THRESHOLD must be an integer between 2 and 100/,
+    )
+  }
+})
+
 test('malware scanner configuration is strict and required in production', () => {
   assert.equal(
     loadEnvironment({

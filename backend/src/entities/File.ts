@@ -8,6 +8,7 @@ import {
   ManyToOne,
   OneToMany,
   PrimaryGeneratedColumn,
+  type Relation,
   UpdateDateColumn,
 } from 'typeorm'
 import { AuditLog } from './AuditLog.js'
@@ -59,14 +60,14 @@ export class FileEntity {
 
   @ManyToOne(() => User, (user) => user.files, { nullable: false, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'owner_id', foreignKeyConstraintName: 'FK_files_owner' })
-  owner!: User
+  owner!: Relation<User>
 
   @OneToMany(() => FileShare, (fileShare) => fileShare.file)
-  shares!: FileShare[]
+  shares!: Relation<FileShare[]>
 
   @OneToMany(() => AuditLog, (auditLog) => auditLog.file)
-  auditLogs!: AuditLog[]
+  auditLogs!: Relation<AuditLog[]>
 
   @OneToMany(() => Backup, (backup) => backup.file)
-  backups!: Backup[]
+  backups!: Relation<Backup[]>
 }

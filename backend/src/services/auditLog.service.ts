@@ -6,6 +6,7 @@ import type { EnvironmentConfig } from '../config/environment.js'
 import { AuditAction, AuditLog } from '../entities/AuditLog.js'
 import { calculateAuditHash, initialAuditHash } from '../utils/auditHash.js'
 import { dispatchSecurityAlert } from './securityAlert.service.js'
+import { recordSuspiciousActivityAlert } from './suspiciousActivityDetection.js'
 
 const auditChainLockId = 8192441
 const alertCooldownMs = 15 * 60 * 1000
@@ -53,6 +54,7 @@ export async function writeAuditLog(
   await repository.save(record)
 
   if (environment) {
+    await recordSuspiciousActivityAlert(manager, record, environment)
     await detectAndDispatchAlert(manager, record, environment)
   }
 }

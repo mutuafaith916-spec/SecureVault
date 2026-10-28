@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
-    "test": "tsx --test tests/health.test.ts tests/authCookies.test.ts tests/environment.test.ts tests/fileEncryption.test.ts tests/fileStorage.test.ts tests/totp.test.ts tests/auditHash.test.ts tests/databaseBackupCrypto.test.ts tests/uploadValidation.test.ts tests/malwareScanner.test.ts",
+    "test": "tsx --test tests/health.test.ts tests/authCookies.test.ts tests/environment.test.ts tests/fileEncryption.test.ts tests/fileStorage.test.ts tests/totp.test.ts tests/auditHash.test.ts tests/databaseBackupCrypto.test.ts tests/uploadValidation.test.ts tests/malwareScanner.test.ts tests/adminAuthorization.test.ts tests/suspiciousActivityDetection.test.ts tests/mfaChallenge.test.ts tests/mfaEmail.test.ts tests/entityImport.test.ts",
     "migration:run": "tsx ./node_modules/typeorm/cli.js migration:run -d src/config/database.ts",
     "migration:revert": "tsx ./node_modules/typeorm/cli.js migration:revert -d src/config/database.ts",
     "migration:show": "tsx ./node_modules/typeorm/cli.js migration:show -d src/config/database.ts",
